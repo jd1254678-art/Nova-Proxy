@@ -4,6 +4,7 @@ import express from "express";
 import { uvPath } from "@titaniumnetwork-dev/ultraviolet";
 import { baremuxPath } from "@mercuryworkshop/bare-mux/node";
 import { server as wisp } from "@mercuryworkshop/wisp-js/server";
+import { WebSocketServer } from "ws";
 
 const epoxyPath = fileURLToPath(
   new URL("./node_modules/@mercuryworkshop/epoxy-transport/dist", import.meta.url)
@@ -151,8 +152,6 @@ app.get("/health", (_req, res) => {
 });
 
 // ==================== DEDICATED MULTIPLAYER RELAY (/mp/) ====================
-import { WebSocketServer } from "ws";
-
 const mpWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 const mpTopics = new Map(); // topic -> Set<ws>
 
