@@ -147,8 +147,96 @@ app.get("/", (_req, res) => {
 
 app.get("/health", (_req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.json({ ok: true, wisp: true, ts: Date.now() });
+  res.json({ ok: true, wisp: true, mp: true, ts: Date.now() });
 });
+
+// ==================== DEDICATED MULTIPLAYER RELAY (/mp/) ====================
+import { WebSocketServer } from "ws";
+
+const mpWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+const mpTopics = new Map(); // topic -> Set<ws>
+
+function mpUnsubAll(ws) {
+  if (!ws._subs) return;
+  for (const topic of ws._subs) {
+    const set = mpTopics.get(topic);
+    if (set) {
+      set.delete(ws);
+      if (set.size === 0) mpTopics.delete(topic);
+    }
+  }
+  ws._subs.clear();
+}
+
+function mpPublish(topic, msg) {
+  const set = mpTopics.get(topic);
+  if (!set || !set.size) return;
+  const raw = JSON.stringify({ t: "msg", topic, msg });
+  for (const peer of set) {
+    if (peer.readyState === 1) {
+      try { peer.send(raw); } catch {}
+    }
+  }
+}
+
+mpWss.on("connection", (ws) => {
+  ws._subs = new Set();
+  ws._will = null;
+  ws._alive = true;
+  ws.on("pong", () => { ws._alive = true; });
+  ws.on("message", (data) => {
+    let p;
+    try { p = JSON.parse(String(data)); } catch { return; }
+    if (!p || typeof p !== "object") return;
+    if (p.t === "ping") {
+      try { ws.send('{"t":"pong"}'); } catch {}
+      return;
+    }
+    if (p.t === "will" && typeof p.topic === "string" && p.msg) {
+      ws._will = { topic: p.topic.slice(0, 128), msg: p.msg };
+      return;
+    }
+    if (p.t === "sub" && typeof p.topic === "string") {
+      const topic = p.topic.slice(0, 128);
+      if (ws._subs.size >= 16) return;
+      ws._subs.add(topic);
+      let set = mpTopics.get(topic);
+      if (!set) { set = new Set(); mpTopics.set(topic, set); }
+      set.add(ws);
+      return;
+    }
+    if (p.t === "unsub" && typeof p.topic === "string") {
+      const topic = p.topic.slice(0, 128);
+      ws._subs.delete(topic);
+      const set = mpTopics.get(topic);
+      if (set) {
+        set.delete(ws);
+        if (set.size === 0) mpTopics.delete(topic);
+      }
+      return;
+    }
+    if (p.t === "pub" && typeof p.topic === "string" && p.msg !== undefined) {
+      mpPublish(p.topic.slice(0, 128), p.msg);
+    }
+  });
+  ws.on("close", () => {
+    const will = ws._will;
+    ws._will = null;
+    mpUnsubAll(ws);
+    if (will) mpPublish(will.topic, will.msg);
+  });
+  ws.on("error", () => {
+    try { ws.close(); } catch {}
+  });
+});
+
+setInterval(() => {
+  for (const ws of mpWss.clients) {
+    if (!ws._alive) { try { ws.terminate(); } catch {} continue; }
+    ws._alive = false;
+    try { ws.ping(); } catch {}
+  }
+}, 25000);
 
 const server = createServer(app);
 server.keepAliveTimeout = 65000;
@@ -158,6 +246,11 @@ server.on("upgrade", (req, socket, head) => {
   if (req.url && req.url.startsWith("/wisp/")) {
     try { socket.setKeepAlive(true, 30000); socket.setNoDelay(true); } catch {}
     wisp.routeRequest(req, socket, head);
+  } else if (req.url && (req.url === "/mp" || req.url.startsWith("/mp/"))) {
+    try { socket.setKeepAlive(true, 25000); socket.setNoDelay(true); } catch {}
+    mpWss.handleUpgrade(req, socket, head, (ws) => {
+      mpWss.emit("connection", ws, req);
+    });
   } else {
     socket.end();
   }
