@@ -2,8 +2,12 @@
   "name": "nova-shell",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "start": "node proxy.mjs"
+    "start": "node proxy.mjs",
+    "set-password": "node proxy.mjs --set-password"
   },
   "dependencies": {
     "@mercuryworkshop/bare-mux": "latest",

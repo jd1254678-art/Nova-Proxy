@@ -1,6 +1,9 @@
 import { createServer } from "node:http";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { readFileSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
+import { networkInterfaces } from "node:os";
 import express from "express";
 import { uvPath } from "@titaniumnetwork-dev/ultraviolet";
 import { baremuxPath } from "@mercuryworkshop/bare-mux/node";
@@ -15,14 +18,55 @@ const app = express();
 const PORT = Number(process.env.PORT) || 8080;
 
 // ==================== PASSWORD LOGIN ====================
-// The password comes from the PROXY_PASSWORD environment variable (never put it
-// in this file). A correct password gets a login token the browser keeps, so
-// people only type it once. Tokens are signed with the password itself, so
-// changing PROXY_PASSWORD logs everyone out.
-const PROXY_PASSWORD = process.env.PROXY_PASSWORD || "";
+// Where the password comes from, in order:
+//   1. the PROXY_PASSWORD environment variable (what hosts like Fly.io use)
+//   2. nova-config.json next to this file (made for you on first run)
+//   3. if neither exists and you started it in a terminal, it asks you once
+//      and saves your answer to nova-config.json
+// Never put the password in this file. A correct password gets a login token
+// the browser keeps, so people only type it once. Tokens are signed with the
+// password itself, so changing the password logs everyone out.
+const CONFIG_FILE = fileURLToPath(new URL("./nova-config.json", import.meta.url));
+const wantsNewPassword = process.argv.includes("--set-password");
+
+function readConfig() {
+  try { return JSON.parse(readFileSync(CONFIG_FILE, "utf8")); } catch { return {}; }
+}
+
+async function askForPassword() {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log("\nSet the password people will need to use Nova.");
+    while (true) {
+      const first = (await rl.question("New password: ")).trim();
+      if (first.length < 4) { console.log("Use at least 4 characters.\n"); continue; }
+      const again = (await rl.question("Type it again: ")).trim();
+      if (first === again) return first;
+      console.log("Those didn't match. Try again.\n");
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+let PROXY_PASSWORD = wantsNewPassword ? "" : (process.env.PROXY_PASSWORD || readConfig().password || "");
+if (!PROXY_PASSWORD && process.stdin.isTTY) {
+  PROXY_PASSWORD = await askForPassword();
+  writeFileSync(CONFIG_FILE, JSON.stringify({ password: PROXY_PASSWORD }, null, 2) + "\n");
+  console.log("Saved to nova-config.json. To change it later, run: npm run set-password\n");
+}
+if (wantsNewPassword) {
+  if (!PROXY_PASSWORD) {
+    console.error("Run this in a terminal window so it can ask you for the new password.");
+    process.exit(1);
+  }
+  console.log("Password updated. Everyone who was logged in will need the new one.");
+  if (process.env.PROXY_PASSWORD) console.log("Note: PROXY_PASSWORD is set in your environment, and it wins over nova-config.json.");
+  process.exit(0);
+}
 const TOKEN_DAYS = Number(process.env.TOKEN_DAYS) || 180;
 if (!PROXY_PASSWORD) {
-  console.warn("PROXY_PASSWORD is not set: nobody can log in and the proxy is locked.");
+  console.warn("No password set (PROXY_PASSWORD or nova-config.json): nobody can log in and the proxy is locked.");
 }
 
 function sign(data) {
@@ -380,6 +424,22 @@ server.on("upgrade", (req, socket, head) => {
   }
 });
 
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`Port ${PORT} is already in use. Close the other copy of Nova, or start with a different PORT.`);
+    process.exit(1);
+  }
+  throw err;
+});
+
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Nova Shell listening on http://0.0.0.0:${PORT}`);
+  console.log(`\nNova Shell is running.`);
+  console.log(`  On this computer:   http://localhost:${PORT}`);
+  for (const list of Object.values(networkInterfaces())) {
+    for (const net of list || []) {
+      if (net.family === "IPv4" && !net.internal) console.log(`  On your Wi-Fi:      http://${net.address}:${PORT}`);
+    }
+  }
+  console.log(`  Wisp address:       ws://localhost:${PORT}/wisp/`);
+  console.log(`\nLeave this window open. Press Ctrl+C to stop.\n`);
 });
