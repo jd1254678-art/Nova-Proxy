@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { uvPath } from "@titaniumnetwork-dev/ultraviolet";
 import { baremuxPath } from "@mercuryworkshop/bare-mux/node";
-import wisp from "wisp-server-node";
+import { server as wisp } from "@mercuryworkshop/wisp-js/server";
 
 const epoxyPath = fileURLToPath(
   new URL("./node_modules/@mercuryworkshop/epoxy-transport/dist", import.meta.url)

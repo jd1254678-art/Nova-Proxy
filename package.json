@@ -8,8 +8,8 @@
   "dependencies": {
     "@mercuryworkshop/bare-mux": "latest",
     "@mercuryworkshop/epoxy-transport": "latest",
+    "@mercuryworkshop/wisp-js": "^0.5.3",
     "@titaniumnetwork-dev/ultraviolet": "latest",
-    "express": "^4.21.1",
-    "wisp-server-node": "latest"
+    "express": "^4.21.1"
   }
 }
