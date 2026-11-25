@@ -1,19 +1,21 @@
 import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
 import express from "express";
 import { uvPath } from "@titaniumnetwork-dev/ultraviolet";
-import { epoxyPath } from "@mercuryworkshop/epoxy-transport";
 import { baremuxPath } from "@mercuryworkshop/bare-mux/node";
 import wisp from "wisp-server-node";
+
+const epoxyPath = fileURLToPath(
+  new URL("./node_modules/@mercuryworkshop/epoxy-transport/dist", import.meta.url)
+);
 
 const app = express();
 const PORT = process.env.PORT || 7860;
 
-// Serve static assets for Ultraviolet, EpoxyTransport, and Bare-Mux
 app.use("/uv/", express.static(uvPath));
 app.use("/epoxy/", express.static(epoxyPath));
 app.use("/baremux/", express.static(baremuxPath));
 
-// Serve custom UV configuration dynamically
 app.get("/uv/uv.config.js", (_req, res) => {
   res.type("application/javascript").send([
     "self.__uv$config = {",
@@ -29,7 +31,6 @@ app.get("/uv/uv.config.js", (_req, res) => {
   ].join("\n"));
 });
 
-// Serve the Nova Shell UI (uses standard quotes inside HTML to avoid backtick conflicts)
 const HTML_SHELL = [
   '<!DOCTYPE html>',
   '<html lang="en">',
@@ -146,7 +147,6 @@ app.get("/", (_req, res) => {
 
 const server = createServer(app);
 
-// Route WebSocket upgrades for Wisp
 server.on("upgrade", (req, socket, head) => {
   if (req.url && req.url.startsWith("/wisp/")) {
     wisp.routeRequest(req, socket, head);
