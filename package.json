@@ -7,7 +7,8 @@
   },
   "scripts": {
     "start": "node proxy.mjs",
-    "set-password": "node proxy.mjs --set-password"
+    "set-password": "node proxy.mjs --set-password",
+    "setup-sync": "node proxy.mjs --setup-sync"
   },
   "dependencies": {
     "@mercuryworkshop/bare-mux": "latest",

@@ -33,7 +33,9 @@ const CONFIG_FILE = path.join(__dir, "nova-config.json");
 const PORT = Number(process.env.PORT) || 8080;
 const SITE_URL = (process.env.NOVA_SITE_URL || "https://site2.jd1254678.workers.dev").replace(/\/+$/, "");
 
+const SITE_REPO = process.env.NOVA_SITE_REPO || "jd1254678-art/Site";
 const wantsNewPassword = process.argv.includes("--set-password");
+const wantsSetupSync = process.argv.includes("--setup-sync");
 const wantsTunnel = process.argv.includes("--tunnel");
 const wantsNoPassword = process.argv.includes("--no-password");
 
@@ -43,6 +45,24 @@ function readConfig() {
 function saveConfig(obj) {
   const merged = Object.assign({}, readConfig(), obj);
   writeFileSync(CONFIG_FILE, JSON.stringify(merged, null, 2) + "\n");
+}
+
+if (wantsSetupSync) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log("\n=== Auto-Sync Setup (Updates your Site automatically on every start) ===");
+    console.log("1. Open: https://github.com/settings/personal-access-tokens/new");
+    console.log("2. Repository access -> Only select repositories -> " + SITE_REPO);
+    console.log("3. Permissions -> Repository permissions -> Contents -> Read and write");
+    console.log("4. Click Generate token and paste it below:\n");
+    const gh = (await rl.question("GitHub Token: ")).trim();
+    if (!gh) { console.log("Cancelled."); process.exit(0); }
+    saveConfig({ githubToken: gh, siteRepo: SITE_REPO });
+    console.log("\nSaved to nova-config.json! Next time you run start.bat, your friends' site will auto-update.\n");
+  } finally {
+    rl.close();
+  }
+  process.exit(0);
 }
 
 async function askForPassword() {
@@ -323,6 +343,52 @@ server.on("error", (err) => {
 
 // ==================== OPTIONAL CLOUDFLARE TUNNEL (--tunnel) ====================
 let tunnelProc = null;
+async function publishLiveWispUrl(host) {
+  const conf = readConfig();
+  const ghToken = process.env.GITHUB_TOKEN || conf.githubToken || "";
+  const repo = process.env.NOVA_SITE_REPO || conf.siteRepo || SITE_REPO;
+  if (!ghToken) {
+    console.log("  Tip: Double-click setup-sync.bat once so friends NEVER need a new link!\n");
+    return;
+  }
+  const apiUrl = `https://api.github.com/repos/${repo}/contents/wisp.json`;
+  const headers = {
+    "Authorization": `Bearer ${ghToken}`,
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "nova-laptop-proxy"
+  };
+  try {
+    let sha;
+    const getRes = await fetch(apiUrl, { headers });
+    if (getRes.ok) {
+      const existing = await getRes.json();
+      sha = existing.sha;
+    }
+    const payload = JSON.stringify({
+      wisp: `wss://${host}/wisp/`,
+      mp: `wss://${host}/mp/`,
+      updatedAt: Date.now()
+    }, null, 2) + "\n";
+    const putBody = {
+      message: "Auto-update live laptop tunnel URL [skip ci]",
+      content: Buffer.from(payload, "utf8").toString("base64")
+    };
+    if (sha) putBody.sha = sha;
+    const putRes = await fetch(apiUrl, {
+      method: "PUT",
+      headers: Object.assign({ "Content-Type": "application/json" }, headers),
+      body: JSON.stringify(putBody)
+    });
+    if (putRes.ok) {
+      console.log(`  [Auto-Sync] Updated ${SITE_URL}/wisp.json! Friends will connect automatically.\n`);
+    } else {
+      console.error(`  [Auto-Sync] GitHub update failed (${putRes.status}). Re-run setup-sync.bat if token expired.\n`);
+    }
+  } catch (err) {
+    console.error("  [Auto-Sync] Network error:", err.message);
+  }
+}
+
 function startCloudflareTunnel() {
   const localBin = path.join(__dir, process.platform === "win32" ? "cloudflared.exe" : "cloudflared");
   const bin = existsSync(localBin) ? localBin : "cloudflared";
@@ -352,13 +418,13 @@ function startCloudflareTunnel() {
       console.log("\n======================================================================");
       console.log("  NOVA LAPTOP PROXY IS LIVE!");
       console.log("======================================================================");
+      console.log(`  Friends Link:  ${SITE_URL}/`);
       console.log(`  1-Click Link:  ${oneClick}`);
       console.log(`  Server URL:    ${wispUrl}`);
       console.log(`  Password:      ${PROXY_PASSWORD ? "(enabled - saved in nova-config.json)" : "(none - open access)"}`);
       console.log("======================================================================");
-      console.log("  Open the 1-Click Link on your Chromebook, or paste the Server URL");
-      console.log("  into Nova's Server box. Leave this window open while using Nova.");
-      console.log("  Press Ctrl+C to stop.\n");
+      console.log("  Leave this window open while using Nova. Press Ctrl+C to stop.\n");
+      publishLiveWispUrl(host);
     }
   }
   tunnelProc.stdout.on("data", handleOut);
