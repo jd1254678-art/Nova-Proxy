@@ -3,6 +3,6 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install
 COPY proxy.mjs ./
-ENV PORT=7860
-EXPOSE 7860
+ENV PORT=8080
+EXPOSE 8080
 CMD ["npm", "start"]
