@@ -23,7 +23,7 @@ try { dns.setDefaultResultOrder("ipv4first"); } catch {}
 // - disable UDP streams so YouTube uses rock-solid TCP/HTTP2 instead of stalled QUIC
 wisp.options.dns_result_order = "ipv4first";
 wisp.options.dns_ttl = 300;
-wisp.options.send_buffer_size = 512;
+wisp.options.send_buffer_size = 128;
 wisp.options.allow_udp_streams = false;
 wisp.options.allow_tcp_streams = true;
 
