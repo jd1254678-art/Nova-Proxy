@@ -14,6 +14,10 @@ const epoxyPath = fileURLToPath(
   new URL("./node_modules/@mercuryworkshop/epoxy-transport/dist", import.meta.url)
 );
 
+// Connect to sites over IPv4 when they have both. Many home networks hand out
+// IPv6 addresses that don't actually work, which makes every page fail.
+wisp.options.dns_result_order = "ipv4first";
+
 const app = express();
 const PORT = Number(process.env.PORT) || 8080;
 
