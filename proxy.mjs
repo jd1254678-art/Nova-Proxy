@@ -224,7 +224,7 @@ const HTML_SHELL = [
   '    function getToken() { try { return localStorage.getItem("nova_token") || ""; } catch { return ""; } }',
   '    function wispAddress() {',
   '      const wispProtocol = location.protocol === "https:" ? "wss://" : "ws://";',
-  '      return wispProtocol + location.host + "/wisp/?token=" + encodeURIComponent(getToken());',
+  '      return wispProtocol + location.host + "/wisp/t/" + encodeURIComponent(getToken() || "none") + "/";',
   '    }',
   '',
   '    function showLogin(message) {',
@@ -408,14 +408,19 @@ server.headersTimeout = 66000;
 server.on("upgrade", (req, socket, head) => {
   if (req.url && req.url.startsWith("/wisp/")) {
     // The proxy itself: only logged-in browsers get through. Browsers can't add
-    // headers to a WebSocket, so the token rides in the URL: /wisp/?token=...
+    // headers to a WebSocket, so the token rides in the URL path:
+    // /wisp/t/<token>/  (the path form, because some Wisp clients such as
+    // libcurl.js refuse any URL that doesn't end in "/"). /wisp/?token=... also works.
     const url = new URL(req.url, "http://localhost");
-    if (!tokenIsValid(url.searchParams.get("token"))) {
+    const inPath = url.pathname.match(/^\/wisp\/t\/([^/]+)\/$/);
+    let token = url.searchParams.get("token");
+    if (inPath) { try { token = decodeURIComponent(inPath[1]); } catch { token = ""; } }
+    if (!tokenIsValid(token)) {
       socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
       return;
     }
-    // wisp-js expects the path to end in "/", so drop the token before handing off.
-    req.url = url.pathname;
+    // wisp-js expects the plain Wisp path, so drop the token before handing off.
+    req.url = "/wisp/";
     try { socket.setKeepAlive(true, 30000); socket.setNoDelay(true); } catch {}
     wisp.routeRequest(req, socket, head);
   } else if (req.url && (req.url === "/mp" || req.url.startsWith("/mp/"))) {
