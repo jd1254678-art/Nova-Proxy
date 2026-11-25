@@ -145,6 +145,11 @@ app.get("/", (_req, res) => {
   res.type("text/html").send(HTML_SHELL);
 });
 
+app.get("/health", (_req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.json({ ok: true, wisp: true, ts: Date.now() });
+});
+
 const server = createServer(app);
 
 server.on("upgrade", (req, socket, head) => {
