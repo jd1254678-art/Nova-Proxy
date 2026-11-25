@@ -1,5 +1,5 @@
 {
-  "name": "nova-proxy",
+  "name": "nova-shell",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
@@ -8,8 +8,8 @@
   "dependencies": {
     "@mercuryworkshop/bare-mux": "latest",
     "@mercuryworkshop/epoxy-transport": "latest",
-    "@mercuryworkshop/wisp-js": "latest",
     "@titaniumnetwork-dev/ultraviolet": "latest",
-    "express": "^4.21.1"
+    "express": "^4.21.1",
+    "wisp-server-node": "latest"
   }
 }
