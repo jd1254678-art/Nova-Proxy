@@ -6,10 +6,10 @@
     "start": "node proxy.mjs"
   },
   "dependencies": {
-    "@mercuryworkshop/bare-mux": "^2.1.7",
-    "@mercuryworkshop/epoxy-transport": "^2.1.27",
-    "@mercuryworkshop/wisp-js": "^1.1.0",
-    "@titaniumnetwork-dev/ultraviolet": "^3.2.10",
+    "@mercuryworkshop/bare-mux": "latest",
+    "@mercuryworkshop/epoxy-transport": "latest",
+    "@mercuryworkshop/wisp-js": "latest",
+    "@titaniumnetwork-dev/ultraviolet": "latest",
     "express": "^4.21.1"
   }
 }
