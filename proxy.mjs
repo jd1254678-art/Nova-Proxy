@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { uvPath } from "@titaniumnetwork-dev/ultraviolet";
@@ -12,6 +13,85 @@ const epoxyPath = fileURLToPath(
 
 const app = express();
 const PORT = Number(process.env.PORT) || 8080;
+
+// ==================== PASSWORD LOGIN ====================
+// The password comes from the PROXY_PASSWORD environment variable (never put it
+// in this file). A correct password gets a login token the browser keeps, so
+// people only type it once. Tokens are signed with the password itself, so
+// changing PROXY_PASSWORD logs everyone out.
+const PROXY_PASSWORD = process.env.PROXY_PASSWORD || "";
+const TOKEN_DAYS = Number(process.env.TOKEN_DAYS) || 180;
+if (!PROXY_PASSWORD) {
+  console.warn("PROXY_PASSWORD is not set: nobody can log in and the proxy is locked.");
+}
+
+function sign(data) {
+  return createHmac("sha256", "nova-login:" + PROXY_PASSWORD).update(data).digest("base64url");
+}
+
+function sameText(a, b) {
+  const x = Buffer.from(String(a));
+  const y = Buffer.from(String(b));
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+function makeToken() {
+  const expires = String(Date.now() + TOKEN_DAYS * 24 * 60 * 60 * 1000);
+  return expires + "." + sign(expires);
+}
+
+function tokenIsValid(token) {
+  if (!PROXY_PASSWORD || typeof token !== "string") return false;
+  const [expires, sig] = token.split(".");
+  if (!expires || !sig || !/^\d+$/.test(expires)) return false;
+  if (Number(expires) < Date.now()) return false;
+  return sameText(sig, sign(expires));
+}
+
+// Slow down password guessing: 10 wrong tries per IP every 15 minutes.
+const failedTries = new Map(); // ip -> { count, since }
+function clientIp(req) {
+  const fwd = req.headers["fly-client-ip"] || req.headers["x-forwarded-for"] || "";
+  return String(fwd).split(",")[0].trim() || req.socket.remoteAddress || "?";
+}
+function tooManyTries(ip) {
+  const entry = failedTries.get(ip);
+  if (!entry) return false;
+  if (Date.now() - entry.since > 15 * 60 * 1000) { failedTries.delete(ip); return false; }
+  return entry.count >= 10;
+}
+function recordFailure(ip) {
+  const entry = failedTries.get(ip);
+  if (!entry || Date.now() - entry.since > 15 * 60 * 1000) failedTries.set(ip, { count: 1, since: Date.now() });
+  else entry.count++;
+}
+
+// The Nova site runs on another domain (GitHub Pages), so it needs CORS to log in.
+app.use("/auth", (req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+app.post("/auth/login", express.json({ limit: "2kb" }), (req, res) => {
+  const ip = clientIp(req);
+  if (tooManyTries(ip)) {
+    return res.status(429).json({ ok: false, error: "Too many wrong tries. Wait 15 minutes." });
+  }
+  const password = req.body && req.body.password;
+  if (PROXY_PASSWORD && typeof password === "string" && sameText(password, PROXY_PASSWORD)) {
+    failedTries.delete(ip);
+    return res.json({ ok: true, token: makeToken() });
+  }
+  recordFailure(ip);
+  res.status(401).json({ ok: false, error: "Wrong password." });
+});
+
+app.get("/auth/check", (req, res) => {
+  res.json({ ok: tokenIsValid(req.query.token) });
+});
 
 app.get("/uv/uv.config.js", (_req, res) => {
   res.type("application/javascript").send([
@@ -76,7 +156,12 @@ const HTML_SHELL = [
   '  <main>',
   '    <div id="welcome">',
   '      <h1>Nova Web Shell</h1>',
-  '      <p>Type any URL or search term in the bar above once the status badge turns green.</p>',
+  '      <p id="welcome-msg">Type any URL or search term in the bar above once the status badge turns green.</p>',
+  '      <form id="login-form" style="display:none;gap:8px">',
+  '        <input id="login-pass" type="password" placeholder="Password" autocomplete="current-password" style="background:#0f172a;color:#f8fafc;border:1px solid #334155;border-radius:6px;padding:8px 12px;font-size:14px" />',
+  '        <button class="nav-btn" type="submit">Log in</button>',
+  '      </form>',
+  '      <p id="login-error" style="color:#f87171"></p>',
   '    </div>',
   '    <iframe id="proxy-frame"></iframe>',
   '  </main>',
@@ -88,13 +173,44 @@ const HTML_SHELL = [
   '    const welcome = document.getElementById("welcome");',
   '    const connection = new BareMux.BareMuxConnection("/baremux/worker.js");',
   '',
+  '    function getToken() { try { return localStorage.getItem("nova_token") || ""; } catch { return ""; } }',
+  '    function wispAddress() {',
+  '      const wispProtocol = location.protocol === "https:" ? "wss://" : "ws://";',
+  '      return wispProtocol + location.host + "/wisp/?token=" + encodeURIComponent(getToken());',
+  '    }',
+  '',
+  '    function showLogin(message) {',
+  '      statusBadge.textContent = "Locked";',
+  '      statusBadge.className = "badge error";',
+  '      document.getElementById("welcome-msg").textContent = "Enter the password to use Nova Shell.";',
+  '      document.getElementById("login-form").style.display = "flex";',
+  '      document.getElementById("login-error").textContent = message || "";',
+  '      document.getElementById("login-pass").focus();',
+  '    }',
+  '',
+  '    document.getElementById("login-form").addEventListener("submit", async (e) => {',
+  '      e.preventDefault();',
+  '      const pass = document.getElementById("login-pass").value;',
+  '      try {',
+  '        const r = await fetch("/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pass }) });',
+  '        const data = await r.json();',
+  '        if (!data.ok) return showLogin(data.error || "Wrong password.");',
+  '        try { localStorage.setItem("nova_token", data.token); } catch {}',
+  '        document.getElementById("login-form").style.display = "none";',
+  '        document.getElementById("login-error").textContent = "";',
+  '        document.getElementById("welcome-msg").textContent = "Type any URL or search term in the bar above once the status badge turns green.";',
+  '        initProxy();',
+  '      } catch { showLogin("Could not reach the server."); }',
+  '    });',
+  '',
   '    async function initProxy() {',
   '      try {',
+  '        const check = await fetch("/auth/check?token=" + encodeURIComponent(getToken())).then((r) => r.json());',
+  '        if (!check.ok) return showLogin();',
   '        if ("serviceWorker" in navigator) {',
   '          await navigator.serviceWorker.register("/uv/sw.js", { scope: "/uv/service/" });',
   '        }',
-  '        const wispProtocol = location.protocol === "https:" ? "wss://" : "ws://";',
-  '        const wispUrl = wispProtocol + location.host + "/wisp/";',
+  '        const wispUrl = wispAddress();',
   '        await connection.setTransport("/epoxy/index.mjs", [{ wisp: wispUrl }]);',
   '        statusBadge.textContent = "Wisp Ready";',
   '        statusBadge.className = "badge ready";',
@@ -115,9 +231,9 @@ const HTML_SHELL = [
   '    form.addEventListener("submit", async (e) => {',
   '      e.preventDefault();',
   '      if (!input.value.trim()) return;',
+  '      if (!getToken()) return showLogin();',
   '      const target = resolveInput(input.value);',
-  '      const wispProtocol = location.protocol === "https:" ? "wss://" : "ws://";',
-  '      const wispUrl = wispProtocol + location.host + "/wisp/";',
+  '      const wispUrl = wispAddress();',
   '      if (!(await connection.getTransport())) {',
   '        await connection.setTransport("/epoxy/index.mjs", [{ wisp: wispUrl }]);',
   '      }',
@@ -243,6 +359,15 @@ server.headersTimeout = 66000;
 
 server.on("upgrade", (req, socket, head) => {
   if (req.url && req.url.startsWith("/wisp/")) {
+    // The proxy itself: only logged-in browsers get through. Browsers can't add
+    // headers to a WebSocket, so the token rides in the URL: /wisp/?token=...
+    const url = new URL(req.url, "http://localhost");
+    if (!tokenIsValid(url.searchParams.get("token"))) {
+      socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    // wisp-js expects the path to end in "/", so drop the token before handing off.
+    req.url = url.pathname;
     try { socket.setKeepAlive(true, 30000); socket.setNoDelay(true); } catch {}
     wisp.routeRequest(req, socket, head);
   } else if (req.url && (req.url === "/mp" || req.url.startsWith("/mp/"))) {
