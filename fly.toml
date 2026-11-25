@@ -1,4 +1,4 @@
-# fly.toml app configuration file generated for nova-proxy-9hl7zq on 2026-11-25T12:58:26Z
+# fly.toml app configuration file generated for nova-proxy-9hl7zq on 2026-11-25T13:28:28Z
 #
 # See https://docs.fly.io/reference/configuration for information about how to use this file.
 #
@@ -7,8 +7,9 @@ app = 'nova-proxy-9hl7zq'
 primary_region = 'ams'
 
 [build]
+
 [http_service]
-  internal_port = 8080
+  internal_port = 7850
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
