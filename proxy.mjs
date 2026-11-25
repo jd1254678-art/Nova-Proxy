@@ -1,49 +1,58 @@
 import { createServer } from "node:http";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { networkInterfaces } from "node:os";
+import dns from "node:dns";
+import path from "node:path";
 import express from "express";
 import { uvPath } from "@titaniumnetwork-dev/ultraviolet";
 import { baremuxPath } from "@mercuryworkshop/bare-mux/node";
 import { server as wisp } from "@mercuryworkshop/wisp-js/server";
 import { WebSocketServer } from "ws";
 
-const epoxyPath = fileURLToPath(
-  new URL("./node_modules/@mercuryworkshop/epoxy-transport/dist", import.meta.url)
-);
+// Prefer IPv4 globally (many home Wi-Fi routers advertise broken IPv6 routes,
+// which causes YouTube and other sites to stall or time out).
+try { dns.setDefaultResultOrder("ipv4first"); } catch {}
 
-// Connect to sites over IPv4 when they have both. Many home networks hand out
-// IPv6 addresses that don't actually work, which makes every page fail.
+// Tune Wisp for smooth YouTube / video streaming on residential laptops:
+// - ipv4first DNS + 5 min cache
+// - 512-packet send buffer (4x default) for smooth 1080p video chunks
+// - disable UDP streams so YouTube uses rock-solid TCP/HTTP2 instead of stalled QUIC
 wisp.options.dns_result_order = "ipv4first";
+wisp.options.dns_ttl = 300;
+wisp.options.send_buffer_size = 512;
+wisp.options.allow_udp_streams = false;
+wisp.options.allow_tcp_streams = true;
 
-const app = express();
+const __dir = path.dirname(fileURLToPath(import.meta.url));
+const epoxyPath = path.join(__dir, "node_modules", "@mercuryworkshop", "epoxy-transport", "dist");
+const CONFIG_FILE = path.join(__dir, "nova-config.json");
 const PORT = Number(process.env.PORT) || 8080;
+const SITE_URL = (process.env.NOVA_SITE_URL || "https://site2.jd1254678.workers.dev").replace(/\/+$/, "");
 
-// ==================== PASSWORD LOGIN ====================
-// Where the password comes from, in order:
-//   1. the PROXY_PASSWORD environment variable (what hosts like Fly.io use)
-//   2. nova-config.json next to this file (made for you on first run)
-//   3. if neither exists and you started it in a terminal, it asks you once
-//      and saves your answer to nova-config.json
-// Never put the password in this file. A correct password gets a login token
-// the browser keeps, so people only type it once. Tokens are signed with the
-// password itself, so changing the password logs everyone out.
-const CONFIG_FILE = fileURLToPath(new URL("./nova-config.json", import.meta.url));
 const wantsNewPassword = process.argv.includes("--set-password");
+const wantsTunnel = process.argv.includes("--tunnel");
+const wantsNoPassword = process.argv.includes("--no-password");
 
 function readConfig() {
   try { return JSON.parse(readFileSync(CONFIG_FILE, "utf8")); } catch { return {}; }
+}
+function saveConfig(obj) {
+  const merged = Object.assign({}, readConfig(), obj);
+  writeFileSync(CONFIG_FILE, JSON.stringify(merged, null, 2) + "\n");
 }
 
 async function askForPassword() {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    console.log("\nSet the password people will need to use Nova.");
+    console.log("\nSet a password for your Nova proxy (or just press Enter to leave it open):");
     while (true) {
-      const first = (await rl.question("New password: ")).trim();
-      if (first.length < 4) { console.log("Use at least 4 characters.\n"); continue; }
+      const first = (await rl.question("Password: ")).trim();
+      if (!first) return "";
+      if (first.length < 4) { console.log("Use at least 4 characters (or press Enter for no password).\n"); continue; }
       const again = (await rl.question("Type it again: ")).trim();
       if (first === again) return first;
       console.log("Those didn't match. Try again.\n");
@@ -53,60 +62,64 @@ async function askForPassword() {
   }
 }
 
-let PROXY_PASSWORD = wantsNewPassword ? "" : (process.env.PROXY_PASSWORD || readConfig().password || "");
-if (!PROXY_PASSWORD && process.stdin.isTTY) {
+const cfg = readConfig();
+let PROXY_PASSWORD = wantsNoPassword
+  ? ""
+  : (wantsNewPassword ? "" : (process.env.PROXY_PASSWORD ?? cfg.password ?? null));
+
+if ((PROXY_PASSWORD === null || wantsNewPassword) && process.stdin.isTTY) {
   PROXY_PASSWORD = await askForPassword();
-  writeFileSync(CONFIG_FILE, JSON.stringify({ password: PROXY_PASSWORD }, null, 2) + "\n");
-  console.log("Saved to nova-config.json. To change it later, run: npm run set-password\n");
+  saveConfig({ password: PROXY_PASSWORD });
+  console.log(
+    PROXY_PASSWORD
+      ? "Saved password to nova-config.json. (Change anytime with: npm run set-password)\n"
+      : "No password set — anyone with your link can connect. (Add one anytime with: npm run set-password)\n"
+  );
 }
 if (wantsNewPassword) {
-  if (!PROXY_PASSWORD) {
+  if (PROXY_PASSWORD === null) {
     console.error("Run this in a terminal window so it can ask you for the new password.");
     process.exit(1);
   }
-  console.log("Password updated. Everyone who was logged in will need the new one.");
-  if (process.env.PROXY_PASSWORD) console.log("Note: PROXY_PASSWORD is set in your environment, and it wins over nova-config.json.");
+  console.log("Updated. Everyone who was logged in will need the new password.");
   process.exit(0);
 }
+PROXY_PASSWORD = PROXY_PASSWORD || "";
+
 const TOKEN_DAYS = Number(process.env.TOKEN_DAYS) || 180;
-if (!PROXY_PASSWORD) {
-  console.warn("No password set (PROXY_PASSWORD or nova-config.json): nobody can log in and the proxy is locked.");
-}
 
 function sign(data) {
   return createHmac("sha256", "nova-login:" + PROXY_PASSWORD).update(data).digest("base64url");
 }
-
 function sameText(a, b) {
   const x = Buffer.from(String(a));
   const y = Buffer.from(String(b));
   return x.length === y.length && timingSafeEqual(x, y);
 }
-
 function makeToken() {
   const expires = String(Date.now() + TOKEN_DAYS * 24 * 60 * 60 * 1000);
   return expires + "." + sign(expires);
 }
-
 function tokenIsValid(token) {
-  if (!PROXY_PASSWORD || typeof token !== "string") return false;
+  if (!PROXY_PASSWORD) return true; // open mode
+  if (typeof token !== "string" || !token) return false;
   const [expires, sig] = token.split(".");
   if (!expires || !sig || !/^\d+$/.test(expires)) return false;
   if (Number(expires) < Date.now()) return false;
   return sameText(sig, sign(expires));
 }
 
-// Slow down password guessing: 10 wrong tries per IP every 15 minutes.
-const failedTries = new Map(); // ip -> { count, since }
+// Slow down password guessing: 12 wrong tries per IP every 15 minutes
+const failedTries = new Map();
 function clientIp(req) {
-  const fwd = req.headers["fly-client-ip"] || req.headers["x-forwarded-for"] || "";
+  const fwd = req.headers["cf-connecting-ip"] || req.headers["fly-client-ip"] || req.headers["x-forwarded-for"] || "";
   return String(fwd).split(",")[0].trim() || req.socket.remoteAddress || "?";
 }
 function tooManyTries(ip) {
   const entry = failedTries.get(ip);
   if (!entry) return false;
   if (Date.now() - entry.since > 15 * 60 * 1000) { failedTries.delete(ip); return false; }
-  return entry.count >= 10;
+  return entry.count >= 12;
 }
 function recordFailure(ip) {
   const entry = failedTries.get(ip);
@@ -114,8 +127,10 @@ function recordFailure(ip) {
   else entry.count++;
 }
 
-// The Nova site runs on another domain (GitHub Pages), so it needs CORS to log in.
-app.use("/auth", (req, res, next) => {
+const app = express();
+
+// CORS for Nova frontend (Cloudflare Workers / GitHub Pages / about:blank)
+app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -123,201 +138,74 @@ app.use("/auth", (req, res, next) => {
   next();
 });
 
-app.post("/auth/login", express.json({ limit: "2kb" }), (req, res) => {
+app.use(express.json({ limit: "8kb" }));
+
+app.post("/auth/login", (req, res) => {
+  if (!PROXY_PASSWORD) return res.json({ ok: true, token: "open", authRequired: false });
   const ip = clientIp(req);
-  if (tooManyTries(ip)) {
-    return res.status(429).json({ ok: false, error: "Too many wrong tries. Wait 15 minutes." });
+  if (tooManyTries(ip)) return res.status(429).json({ ok: false, error: "Too many wrong tries. Wait 15 minutes." });
+  const pass = typeof req.body?.password === "string" ? req.body.password : "";
+  if (!sameText(pass, PROXY_PASSWORD)) {
+    recordFailure(ip);
+    return res.status(401).json({ ok: false, error: "Wrong password." });
   }
-  const password = req.body && req.body.password;
-  if (PROXY_PASSWORD && typeof password === "string" && sameText(password, PROXY_PASSWORD)) {
-    failedTries.delete(ip);
-    return res.json({ ok: true, token: makeToken() });
-  }
-  recordFailure(ip);
-  res.status(401).json({ ok: false, error: "Wrong password." });
+  failedTries.delete(ip);
+  res.json({ ok: true, token: makeToken(), authRequired: true });
 });
 
 app.get("/auth/check", (req, res) => {
-  res.json({ ok: tokenIsValid(req.query.token) });
-});
-
-app.get("/uv/uv.config.js", (_req, res) => {
-  res.type("application/javascript").send([
-    "self.__uv$config = {",
-    '  prefix: "/uv/service/",',
-    '  encodeUrl: Ultraviolet.codec.xor.encode,',
-    '  decodeUrl: Ultraviolet.codec.xor.decode,',
-    '  handler: "/uv/uv.handler.js",',
-    '  client: "/uv/uv.client.js",',
-    '  bundle: "/uv/uv.bundle.js",',
-    '  config: "/uv/uv.config.js",',
-    '  sw: "/uv/uv.sw.js",',
-    "};"
-  ].join("\n"));
-});
-
-app.use("/uv/", express.static(uvPath));
-app.use("/epoxy/", express.static(epoxyPath));
-app.use("/baremux/", express.static(baremuxPath));
-
-const HTML_SHELL = [
-  '<!DOCTYPE html>',
-  '<html lang="en">',
-  '<head>',
-  '  <meta charset="UTF-8" />',
-  '  <meta name="viewport" content="width=device-width, initial-scale=1.0" />',
-  '  <title>Nova Shell</title>',
-  '  <script src="/baremux/index.js"></script>',
-  '  <script src="/uv/uv.bundle.js"></script>',
-  '  <script src="/uv/uv.config.js"></script>',
-  '  <style>',
-  '    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }',
-  '    body { background: #0f172a; color: #f8fafc; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }',
-  '    header { background: #1e293b; padding: 10px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #334155; }',
-  '    .brand { font-weight: 700; font-size: 15px; color: #38bdf8; letter-spacing: 0.5px; }',
-  '    .nav-btn { background: #334155; color: #e2e8f0; border: none; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 13px; }',
-  '    .nav-btn:hover { background: #475569; }',
-  '    #url-form { flex: 1; display: flex; }',
-  '    #url-input { width: 100%; background: #0f172a; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 7px 12px; font-size: 14px; outline: none; }',
-  '    #url-input:focus { border-color: #38bdf8; }',
-  '    .badge { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: #eab308; color: #0f172a; white-space: nowrap; }',
-  '    .badge.ready { background: #22c55e; color: #052e16; }',
-  '    .badge.error { background: #ef4444; color: #ffffff; }',
-  '    main { flex: 1; position: relative; background: #090d16; }',
-  '    iframe { width: 100%; height: 100%; border: none; display: none; background: #ffffff; }',
-  '    #welcome { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 20px; }',
-  '    #welcome h1 { font-size: 28px; color: #f8fafc; }',
-  '    #welcome p { color: #94a3b8; font-size: 14px; max-width: 440px; }',
-  '  </style>',
-  '</head>',
-  '<body>',
-  '  <header>',
-  '    <span class="brand">NOVA SHELL</span>',
-  '    <button class="nav-btn" id="back-btn" title="Back">&#8592;</button>',
-  '    <button class="nav-btn" id="fwd-btn" title="Forward">&#8594;</button>',
-  '    <button class="nav-btn" id="reload-btn" title="Reload">&#8635;</button>',
-  '    <form id="url-form">',
-  '      <input id="url-input" type="text" placeholder="Enter URL or search query (e.g. example.com)..." autocomplete="off" />',
-  '    </form>',
-  '    <span id="status-badge" class="badge">Initializing...</span>',
-  '  </header>',
-  '  <main>',
-  '    <div id="welcome">',
-  '      <h1>Nova Web Shell</h1>',
-  '      <p id="welcome-msg">Type any URL or search term in the bar above once the status badge turns green.</p>',
-  '      <form id="login-form" style="display:none;gap:8px">',
-  '        <input id="login-pass" type="password" placeholder="Password" autocomplete="current-password" style="background:#0f172a;color:#f8fafc;border:1px solid #334155;border-radius:6px;padding:8px 12px;font-size:14px" />',
-  '        <button class="nav-btn" type="submit">Log in</button>',
-  '      </form>',
-  '      <p id="login-error" style="color:#f87171"></p>',
-  '    </div>',
-  '    <iframe id="proxy-frame"></iframe>',
-  '  </main>',
-  '  <script>',
-  '    const statusBadge = document.getElementById("status-badge");',
-  '    const form = document.getElementById("url-form");',
-  '    const input = document.getElementById("url-input");',
-  '    const frame = document.getElementById("proxy-frame");',
-  '    const welcome = document.getElementById("welcome");',
-  '    const connection = new BareMux.BareMuxConnection("/baremux/worker.js");',
-  '',
-  '    function getToken() { try { return localStorage.getItem("nova_token") || ""; } catch { return ""; } }',
-  '    function wispAddress() {',
-  '      const wispProtocol = location.protocol === "https:" ? "wss://" : "ws://";',
-  '      return wispProtocol + location.host + "/wisp/t/" + encodeURIComponent(getToken() || "none") + "/";',
-  '    }',
-  '',
-  '    function showLogin(message) {',
-  '      statusBadge.textContent = "Locked";',
-  '      statusBadge.className = "badge error";',
-  '      document.getElementById("welcome-msg").textContent = "Enter the password to use Nova Shell.";',
-  '      document.getElementById("login-form").style.display = "flex";',
-  '      document.getElementById("login-error").textContent = message || "";',
-  '      document.getElementById("login-pass").focus();',
-  '    }',
-  '',
-  '    document.getElementById("login-form").addEventListener("submit", async (e) => {',
-  '      e.preventDefault();',
-  '      const pass = document.getElementById("login-pass").value;',
-  '      try {',
-  '        const r = await fetch("/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pass }) });',
-  '        const data = await r.json();',
-  '        if (!data.ok) return showLogin(data.error || "Wrong password.");',
-  '        try { localStorage.setItem("nova_token", data.token); } catch {}',
-  '        document.getElementById("login-form").style.display = "none";',
-  '        document.getElementById("login-error").textContent = "";',
-  '        document.getElementById("welcome-msg").textContent = "Type any URL or search term in the bar above once the status badge turns green.";',
-  '        initProxy();',
-  '      } catch { showLogin("Could not reach the server."); }',
-  '    });',
-  '',
-  '    async function initProxy() {',
-  '      try {',
-  '        const check = await fetch("/auth/check?token=" + encodeURIComponent(getToken())).then((r) => r.json());',
-  '        if (!check.ok) return showLogin();',
-  '        if ("serviceWorker" in navigator) {',
-  '          await navigator.serviceWorker.register("/uv/sw.js", { scope: "/uv/service/" });',
-  '        }',
-  '        const wispUrl = wispAddress();',
-  '        await connection.setTransport("/epoxy/index.mjs", [{ wisp: wispUrl }]);',
-  '        statusBadge.textContent = "Wisp Ready";',
-  '        statusBadge.className = "badge ready";',
-  '      } catch (err) {',
-  '        console.error("Proxy init error:", err);',
-  '        statusBadge.textContent = "Init Error";',
-  '        statusBadge.className = "badge error";',
-  '      }',
-  '    }',
-  '',
-  '    function resolveInput(raw) {',
-  '      const trimmed = raw.trim();',
-  '      if (/^https?:\\/\\//i.test(trimmed)) return trimmed;',
-  '      if (trimmed.includes(".") && !trimmed.includes(" ")) return "https://" + trimmed;',
-  '      return "https://duckduckgo.com/?q=" + encodeURIComponent(trimmed);',
-  '    }',
-  '',
-  '    form.addEventListener("submit", async (e) => {',
-  '      e.preventDefault();',
-  '      if (!input.value.trim()) return;',
-  '      if (!getToken()) return showLogin();',
-  '      const target = resolveInput(input.value);',
-  '      const wispUrl = wispAddress();',
-  '      if (!(await connection.getTransport())) {',
-  '        await connection.setTransport("/epoxy/index.mjs", [{ wisp: wispUrl }]);',
-  '      }',
-  '      welcome.style.display = "none";',
-  '      frame.style.display = "block";',
-  '      frame.src = __uv$config.prefix + __uv$config.encodeUrl(target);',
-  '    });',
-  '',
-  '    document.getElementById("back-btn").addEventListener("click", () => {',
-  '      try { frame.contentWindow.history.back(); } catch {}',
-  '    });',
-  '    document.getElementById("fwd-btn").addEventListener("click", () => {',
-  '      try { frame.contentWindow.history.forward(); } catch {}',
-  '    });',
-  '    document.getElementById("reload-btn").addEventListener("click", () => {',
-  '      try { frame.contentWindow.location.reload(); } catch {}',
-  '    });',
-  '',
-  '    initProxy();',
-  '  </script>',
-  '</body>',
-  '</html>'
-].join("\n");
-
-app.get("/", (_req, res) => {
-  res.type("text/html").send(HTML_SHELL);
+  if (!PROXY_PASSWORD) return res.json({ ok: true, authRequired: false });
+  const tok = typeof req.query.token === "string" ? req.query.token : "";
+  res.json({ ok: tokenIsValid(tok), authRequired: true });
 });
 
 app.get("/health", (_req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.json({ ok: true, wisp: true, mp: true, ts: Date.now() });
+  res.json({ ok: true, wisp: true, mp: true, authRequired: !!PROXY_PASSWORD, ts: Date.now() });
+});
+
+// Serve Ultraviolet, Bare-Mux, and Epoxy static assets if someone opens the laptop URL directly
+app.use("/uv/", express.static(uvPath));
+app.use("/baremux/", express.static(baremuxPath));
+app.use("/epoxy/", express.static(epoxyPath));
+
+app.get("/", (_req, res) => {
+  res.type("text/html").send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nova Proxy Server</title>
+<style>
+  body{margin:0;min-height:100vh;display:grid;place-items:center;background:#07050d;color:#f5f3ff;font-family:Inter,system-ui,sans-serif;padding:20px}
+  .card{max-width:460px;width:100%;background:#110d1e;border:1px solid rgba(167,139,250,.28);border-radius:16px;padding:26px;text-align:center;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+  h1{margin:0 0 8px;font-size:22px;color:#c4b5fd}
+  p{margin:0 0 16px;color:#9d94b8;font-size:14px;line-height:1.5}
+  .pill{display:inline-block;padding:6px 12px;border-radius:999px;background:rgba(74,222,128,.14);border:1px solid rgba(74,222,128,.4);color:#4ade80;font-size:12.5px;font-weight:700;margin-bottom:16px}
+  a.btn{display:inline-block;padding:11px 20px;border-radius:10px;background:linear-gradient(135deg,#8b5cf6,#a855f7);color:#fff;text-decoration:none;font-weight:600;font-size:14px}
+  code{display:block;margin-top:14px;padding:10px;border-radius:8px;background:#090611;border:1px solid rgba(167,139,250,.18);color:#e9d5ff;font-size:12px;word-break:break-all}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="pill">● Nova Proxy Online</div>
+    <h1>Nova Laptop Proxy</h1>
+    <p>Your Wisp proxy &amp; Multiplayer relay are running smoothly. Open Nova below to connect automatically:</p>
+    <a class="btn" id="open-nova" href="${SITE_URL}">Open Nova →</a>
+    <code id="wisp-out"></code>
+  </div>
+  <script>
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const wisp = proto + "//" + location.host + "/wisp/";
+    document.getElementById("wisp-out").textContent = wisp;
+    document.getElementById("open-nova").href = ${JSON.stringify(SITE_URL)} + "/?server=" + encodeURIComponent(location.origin);
+  </script>
+</body>
+</html>`);
 });
 
 // ==================== DEDICATED MULTIPLAYER RELAY (/mp/) ====================
 const mpWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
-const mpTopics = new Map(); // topic -> Set<ws>
+const mpTopics = new Map();
 
 function mpUnsubAll(ws) {
   if (!ws._subs) return;
@@ -351,10 +239,7 @@ mpWss.on("connection", (ws) => {
     let p;
     try { p = JSON.parse(String(data)); } catch { return; }
     if (!p || typeof p !== "object") return;
-    if (p.t === "ping") {
-      try { ws.send('{"t":"pong"}'); } catch {}
-      return;
-    }
+    if (p.t === "ping") { try { ws.send('{"t":"pong"}'); } catch {} return; }
     if (p.t === "will" && typeof p.topic === "string" && p.msg) {
       ws._will = { topic: p.topic.slice(0, 128), msg: p.msg };
       return;
@@ -388,9 +273,7 @@ mpWss.on("connection", (ws) => {
     mpUnsubAll(ws);
     if (will) mpPublish(will.topic, will.msg);
   });
-  ws.on("error", () => {
-    try { ws.close(); } catch {}
-  });
+  ws.on("error", () => { try { ws.close(); } catch {} });
 });
 
 setInterval(() => {
@@ -401,25 +284,22 @@ setInterval(() => {
   }
 }, 25000);
 
+// ==================== HTTP + WEBSOCKET UPGRADE SERVER ====================
 const server = createServer(app);
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 
 server.on("upgrade", (req, socket, head) => {
   if (req.url && req.url.startsWith("/wisp/")) {
-    // The proxy itself: only logged-in browsers get through. Browsers can't add
-    // headers to a WebSocket, so the token rides in the URL path:
-    // /wisp/t/<token>/  (the path form, because some Wisp clients such as
-    // libcurl.js refuse any URL that doesn't end in "/"). /wisp/?token=... also works.
     const url = new URL(req.url, "http://localhost");
-    const inPath = url.pathname.match(/^\/wisp\/t\/([^/]+)\/$/);
-    let token = url.searchParams.get("token");
+    const inPath = url.pathname.match(/^\/wisp\/t\/([^/]+)\/?$/);
+    let token = url.searchParams.get("token") || "";
     if (inPath) { try { token = decodeURIComponent(inPath[1]); } catch { token = ""; } }
     if (!tokenIsValid(token)) {
       socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
       return;
     }
-    // wisp-js expects the plain Wisp path, so drop the token before handing off.
+    // Strip token path/query before passing to wisp-js
     req.url = "/wisp/";
     try { socket.setKeepAlive(true, 30000); socket.setNoDelay(true); } catch {}
     wisp.routeRequest(req, socket, head);
@@ -435,20 +315,85 @@ server.on("upgrade", (req, socket, head) => {
 
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
-    console.error(`Port ${PORT} is already in use. Close the other copy of Nova, or start with a different PORT.`);
+    console.error(`Port ${PORT} is already in use. Close the other Nova window first.`);
     process.exit(1);
   }
   throw err;
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`\nNova Shell is running.`);
-  console.log(`  On this computer:   http://localhost:${PORT}`);
-  for (const list of Object.values(networkInterfaces())) {
-    for (const net of list || []) {
-      if (net.family === "IPv4" && !net.internal) console.log(`  On your Wi-Fi:      http://${net.address}:${PORT}`);
+// ==================== OPTIONAL CLOUDFLARE TUNNEL (--tunnel) ====================
+let tunnelProc = null;
+function startCloudflareTunnel() {
+  const localBin = path.join(__dir, process.platform === "win32" ? "cloudflared.exe" : "cloudflared");
+  const bin = existsSync(localBin) ? localBin : "cloudflared";
+  const token = process.env.CLOUDFLARED_TOKEN || readConfig().tunnelToken || "";
+  const args = token
+    ? ["tunnel", "--no-autoupdate", "run", "--token", token]
+    : ["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${PORT}`];
+
+  console.log(token ? "Starting your Cloudflare Named Tunnel..." : "Opening a free Cloudflare public tunnel...");
+  try {
+    tunnelProc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+  } catch (err) {
+    console.error("Could not start cloudflared:", err.message);
+    return;
+  }
+
+  let printedUrl = false;
+  function handleOut(chunk) {
+    const text = String(chunk);
+    const m = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+    if (m && !printedUrl) {
+      printedUrl = true;
+      const pubUrl = m[0];
+      const host = pubUrl.replace(/^https:\/\//i, "");
+      const wispUrl = `wss://${host}/wisp/`;
+      const oneClick = `${SITE_URL}/?server=${encodeURIComponent(host)}`;
+      console.log("\n======================================================================");
+      console.log("  NOVA LAPTOP PROXY IS LIVE!");
+      console.log("======================================================================");
+      console.log(`  1-Click Link:  ${oneClick}`);
+      console.log(`  Server URL:    ${wispUrl}`);
+      console.log(`  Password:      ${PROXY_PASSWORD ? "(enabled - saved in nova-config.json)" : "(none - open access)"}`);
+      console.log("======================================================================");
+      console.log("  Open the 1-Click Link on your Chromebook, or paste the Server URL");
+      console.log("  into Nova's Server box. Leave this window open while using Nova.");
+      console.log("  Press Ctrl+C to stop.\n");
     }
   }
-  console.log(`  Wisp address:       ws://localhost:${PORT}/wisp/`);
-  console.log(`\nLeave this window open. Press Ctrl+C to stop.\n`);
+  tunnelProc.stdout.on("data", handleOut);
+  tunnelProc.stderr.on("data", handleOut);
+  tunnelProc.on("error", (err) => {
+    console.error("cloudflared error:", err.message);
+  });
+  tunnelProc.on("exit", (code) => {
+    if (code && !printedUrl) {
+      console.error(`cloudflared exited with code ${code}. Your local proxy is still running on http://localhost:${PORT}`);
+    }
+  });
+}
+
+function shutdown() {
+  if (tunnelProc) { try { tunnelProc.kill(); } catch {} }
+  try { server.close(); } catch {}
+  process.exit(0);
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`\nNova Proxy listening on http://localhost:${PORT}`);
+  for (const list of Object.values(networkInterfaces())) {
+    for (const net of list || []) {
+      if (net.family === "IPv4" && !net.internal) {
+        console.log(`  Local Wi-Fi:   http://${net.address}:${PORT}`);
+      }
+    }
+  }
+  if (wantsTunnel) {
+    startCloudflareTunnel();
+  } else {
+    console.log(`  Wisp address:  ws://localhost:${PORT}/wisp/`);
+    console.log(`\nTip: Run with --tunnel (or double-click start.bat) for a public HTTPS link.\n`);
+  }
 });
