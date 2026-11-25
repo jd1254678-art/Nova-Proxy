@@ -11,7 +11,7 @@ const epoxyPath = fileURLToPath(
 );
 
 const app = express();
-const PORT = process.env.PORT || 7860;
+const PORT = Number(process.env.PORT) || 8080;
 
 app.get("/uv/uv.config.js", (_req, res) => {
   res.type("application/javascript").send([
@@ -256,5 +256,5 @@ server.on("upgrade", (req, socket, head) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Nova Shell running at http://localhost:${PORT}`);
+  console.log(`Nova Shell listening on http://0.0.0.0:${PORT}`);
 });
