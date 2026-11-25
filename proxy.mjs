@@ -151,9 +151,12 @@ app.get("/health", (_req, res) => {
 });
 
 const server = createServer(app);
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
 
 server.on("upgrade", (req, socket, head) => {
   if (req.url && req.url.startsWith("/wisp/")) {
+    try { socket.setKeepAlive(true, 30000); socket.setNoDelay(true); } catch {}
     wisp.routeRequest(req, socket, head);
   } else {
     socket.end();
