@@ -370,7 +370,7 @@ async function publishLiveWispUrl(host) {
       updatedAt: Date.now()
     }, null, 2) + "\n";
     const putBody = {
-      message: "Auto-update live laptop tunnel URL [skip ci]",
+      message: "Auto-update live laptop tunnel URL",
       content: Buffer.from(payload, "utf8").toString("base64")
     };
     if (sha) putBody.sha = sha;
