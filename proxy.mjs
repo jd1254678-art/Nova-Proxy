@@ -12,10 +12,6 @@ const epoxyPath = fileURLToPath(
 const app = express();
 const PORT = process.env.PORT || 7860;
 
-app.use("/uv/", express.static(uvPath));
-app.use("/epoxy/", express.static(epoxyPath));
-app.use("/baremux/", express.static(baremuxPath));
-
 app.get("/uv/uv.config.js", (_req, res) => {
   res.type("application/javascript").send([
     "self.__uv$config = {",
@@ -26,10 +22,14 @@ app.get("/uv/uv.config.js", (_req, res) => {
     '  client: "/uv/uv.client.js",',
     '  bundle: "/uv/uv.bundle.js",',
     '  config: "/uv/uv.config.js",',
-    '  sw: "/uv/sw.js",',
+    '  sw: "/uv/uv.sw.js",',
     "};"
   ].join("\n"));
 });
+
+app.use("/uv/", express.static(uvPath));
+app.use("/epoxy/", express.static(epoxyPath));
+app.use("/baremux/", express.static(baremuxPath));
 
 const HTML_SHELL = [
   '<!DOCTYPE html>',
