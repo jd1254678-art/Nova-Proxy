@@ -206,7 +206,7 @@ app.get("/", (_req, res) => {
 
       <div class="setting-row">
         <label for="panic-key-input">Panic Key</label>
-        <input id="panic-key-input" type="text" maxlength="1" value="\`" />
+        <input id="panic-key-input" type="text" maxlength="1" value="`" />
       </div>
 
       <div class="setting-row">
@@ -242,7 +242,7 @@ app.get("/", (_req, res) => {
       antiClose: true,
       autoCloak: false,
       cloakPreset: "default",
-      panicKey: "\`",
+      panicKey: "`",
       panicUrl: "https://classroom.google.com"
     };
 
@@ -286,13 +286,13 @@ app.get("/", (_req, res) => {
 
     function buildHomeSrcdoc() {
       const cards = SHORTCUTS.map(
-        (s) => \`<div class="card" onclick="parent.postMessage({type:'NAV',url:'\${s.url}'},'*')">
-          <div class="card-title">\${s.name}</div>
-          <div class="card-desc">\${s.desc}</div>
-        </div>\`
+        (s) => `<div class="card" onclick="parent.postMessage({type:'NAV',url:'${s.url}'},'*')">
+          <div class="card-title">${s.name}</div>
+          <div class="card-desc">${s.desc}</div>
+        </div>`
       ).join("");
 
-      return \`<!DOCTYPE html>
+      return `<!DOCTYPE html>
       <html><head><style>
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, sans-serif; }
         body {
@@ -328,8 +328,8 @@ app.get("/", (_req, res) => {
           <input id="q" placeholder="Search the web or enter a URL..." autofocus />
           <button type="submit">Go</button>
         </form>
-        <div class="grid">\${cards}</div>
-      </body></html>\`;
+        <div class="grid">${cards}</div>
+      </body></html>`;
     }
 
     function applyPreferences() {
@@ -400,7 +400,7 @@ app.get("/", (_req, res) => {
     function handleKeydown(e) {
       const tag = e.target?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || e.target?.isContentEditable) return;
-      if (e.key === (prefs.panicKey || "\`")) {
+      if (e.key === (prefs.panicKey || "`")) {
         e.preventDefault();
         triggerPanic();
       }
@@ -421,7 +421,7 @@ app.get("/", (_req, res) => {
         antiClose: document.getElementById("anti-close-toggle").checked,
         autoCloak: document.getElementById("auto-cloak-toggle").checked,
         cloakPreset: document.getElementById("cloak-preset").value,
-        panicKey: document.getElementById("panic-key-input").value || "\`",
+        panicKey: document.getElementById("panic-key-input").value || "`",
         panicUrl: document.getElementById("panic-url-input").value.trim() || "https://classroom.google.com"
       };
       localStorage.setItem("nova_prefs", JSON.stringify(prefs));
@@ -441,7 +441,7 @@ app.get("/", (_req, res) => {
       const cloak = CLOAK_PRESETS[prefs.cloakPreset] || CLOAK_PRESETS.drive;
 
       if (useBlob) {
-        const html = \`<!DOCTYPE html><html><head><title>\${cloak.title}</title><link rel="icon" href="\${cloak.icon}"></head><body style="margin:0;overflow:hidden;background:#0d1117;"><iframe src="\${targetUrl}" style="width:100vw;height:100vh;border:none;"></iframe></body></html>\`;
+        const html = `<!DOCTYPE html><html><head><title>${cloak.title}</title><link rel="icon" href="${cloak.icon}"></head><body style="margin:0;overflow:hidden;background:#0d1117;"><iframe src="${targetUrl}" style="width:100vw;height:100vh;border:none;"></iframe></body></html>`;
         const blobUrl = URL.createObjectURL(new Blob([html], { type: "text/html" }));
         const win = window.open(blobUrl, "_blank");
         if (!win) return alert("Allow pop-ups to open in a blob: tab.");
@@ -592,5 +592,5 @@ server.on("upgrade", (req, socket, head) => {
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-  console.log(\`Nova Shell running at http://localhost:\${PORT}\`);
+  console.log(Nova Shell running at http://localhost:${PORT});
 });
