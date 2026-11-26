@@ -10,20 +10,27 @@ import path from "node:path";
 import express from "express";
 import { uvPath } from "@titaniumnetwork-dev/ultraviolet";
 import { baremuxPath } from "@mercuryworkshop/bare-mux/node";
-import { server as wisp } from "@mercuryworkshop/wisp-js/server";
+import { server as wisp, logging as wispLogging } from "@mercuryworkshop/wisp-js/server";
 import { WebSocketServer } from "ws";
 
 // Prefer IPv4 globally (many home Wi-Fi routers advertise broken IPv6 routes,
 // which causes YouTube and other sites to stall or time out).
 try { dns.setDefaultResultOrder("ipv4first"); } catch {}
 
-// Tune Wisp for smooth YouTube / video streaming on residential laptops:
-// - ipv4first DNS + 5 min cache
-// - 512-packet send buffer (4x default) for smooth 1080p video chunks
-// - disable UDP streams so YouTube uses rock-solid TCP/HTTP2 instead of stalled QUIC
+// Silence per-stream info/warn spam so Windows cmd.exe stdout buffering never
+// throttles Node.js after hours of uptime.
+try { wispLogging.set_level(wispLogging.ERROR); } catch {}
+
+// Tune Wisp for long-running stability on residential laptops:
+// - ipv4first DNS + 2 min cache
+// - 128-packet send buffer for smooth streaming without memory buildup
+// - cap runaway streams so zombie sockets never degrade speed over time
+// - disable UDP streams so sites use rock-solid TCP/HTTP2
 wisp.options.dns_result_order = "ipv4first";
-wisp.options.dns_ttl = 300;
+wisp.options.dns_ttl = 120;
 wisp.options.send_buffer_size = 128;
+wisp.options.stream_limit_per_host = 64;
+wisp.options.stream_limit_total = 256;
 wisp.options.allow_udp_streams = false;
 wisp.options.allow_tcp_streams = true;
 
@@ -321,7 +328,7 @@ server.on("upgrade", (req, socket, head) => {
     }
     // Strip token path/query before passing to wisp-js
     req.url = "/wisp/";
-    try { socket.setKeepAlive(true, 30000); socket.setNoDelay(true); } catch {}
+    try { socket.setKeepAlive(true, 15000); socket.setNoDelay(true); } catch {}
     wisp.routeRequest(req, socket, head);
   } else if (req.url && (req.url === "/mp" || req.url.startsWith("/mp/"))) {
     try { socket.setKeepAlive(true, 25000); socket.setNoDelay(true); } catch {}
@@ -394,8 +401,8 @@ function startCloudflareTunnel() {
   const bin = existsSync(localBin) ? localBin : "cloudflared";
   const token = process.env.CLOUDFLARED_TOKEN || readConfig().tunnelToken || "";
   const args = token
-    ? ["tunnel", "--no-autoupdate", "run", "--token", token]
-    : ["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${PORT}`];
+    ? ["tunnel", "--no-autoupdate", "--protocol", "http2", "run", "--token", token]
+    : ["tunnel", "--no-autoupdate", "--protocol", "http2", "--url", `http://127.0.0.1:${PORT}`];
 
   console.log(token ? "Starting your Cloudflare Named Tunnel..." : "Opening a free Cloudflare public tunnel...");
   try {
